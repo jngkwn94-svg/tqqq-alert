@@ -2,10 +2,7 @@ import os
 import requests
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
-import pytz
 
-# 텔레그램 설정
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
@@ -13,68 +10,63 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"})
 
-def get_data(ticker, period="300d"):
+def get_close(ticker, period="300d"):
     df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
-    return df
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df['Close'].dropna()
 
 def calc_signal():
-    # 데이터 수집
-    tqqq = get_data("TQQQ")
-    qqq  = get_data("QQQ")
-    spy  = get_data("SPY")
-    vix  = get_data("^VIX")
-    dxy  = get_data("DX-Y.NYB")
-    us10y = get_data("^TNX")
-    us2y  = get_data("^IRX")
+    tqqq  = get_close("TQQQ")
+    qqq   = get_close("QQQ")
+    spy   = get_close("SPY")
+    vix   = get_close("^VIX")
+    dxy   = get_close("DX-Y.NYB")
+    us10y = get_close("^TNX")
+    us2y  = get_close("^IRX")
 
-    # 최신 종가
-    t_c   = float(tqqq['Close'].iloc[-1])
-    t_p   = float(tqqq['Close'].iloc[-2])
-    t_ma200 = float(tqqq['Close'].rolling(200).mean().iloc[-1])
-    t_v20 = float(tqqq['Close'].pct_change().rolling(20).std().iloc[-1])
-
+    t_c     = float(tqqq.iloc[-1])
+    t_p     = float(tqqq.iloc[-2])
+    t_ma200 = float(tqqq.rolling(200).mean().iloc[-1])
+    t_v20   = float(tqqq.pct_change().rolling(20).std().iloc[-1])
     dist200 = (t_c / t_ma200) * 100.0
 
-    q_close = float(qqq['Close'].iloc[-1])
-    q_ma3   = float(qqq['Close'].rolling(3).mean().iloc[-1])
-    q_ma161 = float(qqq['Close'].rolling(161).mean().iloc[-1])
-    q_ma3_prev = float(qqq['Close'].rolling(3).mean().iloc[-2])
+    q_close = float(qqq.iloc[-1])
+    q_ma3   = float(qqq.rolling(3).mean().iloc[-1])
+    q_ma161 = float(qqq.rolling(161).mean().iloc[-1])
 
-    s_c     = float(spy['Close'].iloc[-1])
-    s_ma200 = float(spy['Close'].rolling(200).mean().iloc[-1])
+    s_c     = float(spy.iloc[-1])
+    s_ma200 = float(spy.rolling(200).mean().iloc[-1])
     spy_dist200 = (s_c / s_ma200) * 100.0
 
-    vix_c = float(vix['Close'].iloc[-1])
+    vix_c = float(vix.iloc[-1])
 
-    dxy_c   = float(dxy['Close'].iloc[-1])
-    dxy_ref = float(dxy['Close'].iloc[-121]) if len(dxy) >= 121 else float(dxy['Close'].iloc[0])
+    dxy_c   = float(dxy.iloc[-1])
+    dxy_ref = float(dxy.iloc[-121]) if len(dxy) >= 121 else float(dxy.iloc[0])
     dxy_roc = ((dxy_c / dxy_ref) - 1.0) * 100.0
 
-    us10y_c   = float(us10y['Close'].iloc[-1])
-    us10y_ref = float(us10y['Close'].iloc[-61]) if len(us10y) >= 61 else float(us10y['Close'].iloc[0])
+    us10y_c   = float(us10y.iloc[-1])
+    us10y_ref = float(us10y.iloc[-61]) if len(us10y) >= 61 else float(us10y.iloc[0])
     us10y_chg = us10y_c - us10y_ref
 
-    us2y_c   = float(us2y['Close'].iloc[-1])
-    us2y_ref = float(us2y['Close'].iloc[-81]) if len(us2y) >= 81 else float(us2y['Close'].iloc[0])
+    us2y_c   = float(us2y.iloc[-1])
+    us2y_ref = float(us2y.iloc[-81]) if len(us2y) >= 81 else float(us2y.iloc[0])
     us2y_chg = us2y_c - us2y_ref
 
-    # 전략 판단
-    vol_thr = 0.059
-    locked = t_v20 >= vol_thr
-
+    vol_thr  = 0.059
+    locked   = t_v20 >= vol_thr
     above200 = dist200 >= 102.27
-    qbull = q_ma3 > q_ma161
+    qbull    = q_ma3 > q_ma161
     spy_bear = spy_dist200 <= 96.80
     vix_risk = vix_c >= 46.0
 
-    t3_qweak = q_close < q_ma3
+    t3_qweak    = q_close < q_ma3
     t3_dxy_risk = dxy_roc > 0.0
     t3_10y_risk = us10y_chg > 0.40
     t3_2y_risk  = us2y_chg > 0.50
     t3_risk_zero = t3_qweak and ((t3_dxy_risk and t3_10y_risk) or t3_2y_risk)
     t3_cap = t3_qweak and not t3_risk_zero
 
-    # 기본 비중 결정
     if locked or spy_bear or vix_risk:
         base_weight = 0.0
     elif above200 and qbull:
@@ -84,7 +76,6 @@ def calc_signal():
     else:
         base_weight = 0.0
 
-    # T3 필터 적용
     if t3_risk_zero:
         final_weight = 0.0
     elif t3_cap and base_weight > 0.80:
@@ -92,7 +83,6 @@ def calc_signal():
     else:
         final_weight = base_weight
 
-    # 과열 단계 (간소화)
     if dist200 >= 153.0:
         final_weight = 0.0
     elif dist200 >= 147.0 and final_weight > 0.05:
@@ -102,18 +92,15 @@ def calc_signal():
     elif dist200 >= 140.0 and final_weight > 0.90:
         final_weight = 0.90
 
-    # 포지션 텍스트
     def weight_to_str(w):
         if w <= 0: return "현금(SGOV)"
         return f"TQQQ({int(w*100)}%)"
 
-    pos_str = weight_to_str(final_weight)
-
-    # 상태 이모지
-    def risk_icon(is_risk):
+    def ri(is_risk):
         return "🔴" if is_risk else "🟢"
 
     chg_pct = ((t_c / t_p) - 1.0) * 100.0
+    pos_str = weight_to_str(final_weight)
 
     msg = f"""📊 <b>김째매매법 일일현황</b>
 
@@ -124,15 +111,15 @@ def calc_signal():
 TQQQ: {t_c:.4f} ({chg_pct:+.2f}%)
 200일 이동평균: {t_ma200:.4f}
 200일 이격도: {dist200:.2f}%
-20일 변동성: {t_v20*100:.2f}% {risk_icon(locked)}
+20일 변동성: {t_v20*100:.2f}% {ri(locked)}
 
-SPY 200일 필터: {spy_dist200:.2f}% {risk_icon(spy_bear)}
-VIX: {vix_c:.2f} {risk_icon(vix_risk)}
+SPY 200일 필터: {spy_dist200:.2f}% {ri(spy_bear)}
+VIX: {vix_c:.2f} {ri(vix_risk)}
 
 T3D80: {"강한위험(현금) 🔴" if t3_risk_zero else "80%cap 🔴" if t3_cap else "정상 🟢"}
-DXY 120D: {dxy_roc:+.2f}% {risk_icon(t3_dxy_risk)}
-10Y 60D: {us10y_chg:+.2f}%p {risk_icon(t3_10y_risk)}
-2Y 80D: {us2y_chg:+.2f}%p {risk_icon(t3_2y_risk)}
+DXY 120D: {dxy_roc:+.2f}% {ri(t3_dxy_risk)}
+10Y 60D: {us10y_chg:+.2f}%p {ri(t3_10y_risk)}
+2Y 80D: {us2y_chg:+.2f}%p {ri(t3_2y_risk)}
 QQQ 3일선: {"약세 🔴" if t3_qweak else "정상 🟢"}"""
 
     send_telegram(msg)
